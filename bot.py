@@ -143,18 +143,57 @@ def handle_file_shared(event: dict, client, logger) -> None:
 
 @app.event("message")
 def handle_message(event: dict, client, logger) -> None:
-    # Skip bots and non-standard subtypes
-    if event.get("bot_id") or event.get("subtype"):
+    if event.get("bot_id"):
         return
 
+    subtype = event.get("subtype", "")
     channel_id = event.get("channel", "")
     user_id = event.get("user", "")
-    text = event.get("text", "")
 
-    if not text:
+    logger.info(f"message event: subtype={subtype!r} channel={channel_id}")
+
+    actual_name = _channel_name(client, channel_id)
+    if actual_name != TARGET_CHANNEL_NAME:
+        logger.info(f"Ignoring channel '{actual_name}'")
         return
 
-    if _channel_name(client, channel_id) != TARGET_CHANNEL_NAME:
+    # Handle direct file uploads (subtype=file_share)
+    if subtype == "file_share":
+        files = event.get("files", [])
+        logger.info(f"file_share message with {len(files)} file(s)")
+        for f in files:
+            mimetype = f.get("mimetype", "")
+            name = f.get("name", "file.pdf")
+            if mimetype != "application/pdf" and not name.lower().endswith(".pdf"):
+                logger.info(f"Skipping non-PDF file: {name} ({mimetype})")
+                continue
+            download_url = f.get("url_private_download") or f.get("url_private")
+            if not download_url:
+                continue
+            pdf_path = f"/tmp/{f['id']}.pdf"
+            try:
+                r = requests.get(
+                    download_url,
+                    headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}"},
+                    timeout=60,
+                )
+                r.raise_for_status()
+                with open(pdf_path, "wb") as fh:
+                    fh.write(r.content)
+                logger.info(f"Downloaded file to {pdf_path}")
+            except Exception as exc:
+                logger.error(f"File download failed: {exc}")
+                client.chat_postMessage(channel=channel_id, text=f":x: Could not download PDF: {exc}")
+                continue
+            process_pdf(client, channel_id, user_id, pdf_path, name)
+        return
+
+    # Skip other subtypes
+    if subtype:
+        return
+
+    text = event.get("text", "")
+    if not text:
         return
 
     urls = PDF_URL_RE.findall(text)
@@ -162,7 +201,6 @@ def handle_message(event: dict, client, logger) -> None:
         return
 
     for url in urls:
-        # Clean up Slack's angle-bracket link format if present
         url = url.strip("<>")
         filename = url.rstrip("/").split("/")[-1]
         if not filename.lower().endswith(".pdf"):
