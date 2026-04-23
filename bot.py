@@ -28,6 +28,13 @@ app = App(token=SLACK_BOT_TOKEN)
 uploader = ZoteroUploader()
 
 
+@app.middleware
+def log_all_events(logger, body, next):
+    event = body.get("event", {})
+    logger.info(f">>> INCOMING: type={event.get('type')} subtype={event.get('subtype')} channel={event.get('channel') or event.get('channel_id')}")
+    return next()
+
+
 def _post_uploading(client, channel_id: str) -> str:
     resp = client.chat_postMessage(
         channel=channel_id,
