@@ -15,8 +15,6 @@ load_dotenv()
 
 SLACK_BOT_TOKEN = os.environ["SLACK_BOT_TOKEN"]
 SLACK_APP_TOKEN = os.environ["SLACK_APP_TOKEN"]
-TARGET_CHANNEL_NAME = "zotero-test"
-
 PDF_URL_RE = re.compile(
     r"https?://[^\s>\"']+(?:"
     r"\.pdf"
@@ -28,14 +26,6 @@ PDF_URL_RE = re.compile(
 
 app = App(token=SLACK_BOT_TOKEN)
 uploader = ZoteroUploader()
-
-
-def _channel_name(client, channel_id: str) -> str:
-    try:
-        info = client.conversations_info(channel=channel_id)
-        return info["channel"].get("name", "")
-    except Exception:
-        return ""
 
 
 def _post_uploading(client, channel_id: str) -> str:
@@ -96,11 +86,7 @@ def handle_file_shared(event: dict, client, logger) -> None:
         logger.info("Skipping: missing file_id or channel_id")
         return
 
-    actual_name = _channel_name(client, channel_id)
-    logger.info(f"Channel name resolved: '{actual_name}' (expecting '{TARGET_CHANNEL_NAME}')")
-    if actual_name != TARGET_CHANNEL_NAME:
-        logger.info(f"Skipping: wrong channel")
-        return
+    logger.info(f"Processing file_shared in channel {channel_id}")
 
     try:
         info = client.files_info(file=file_id)
@@ -152,10 +138,7 @@ def handle_message(event: dict, client, logger) -> None:
 
     logger.info(f"message event: subtype={subtype!r} channel={channel_id}")
 
-    actual_name = _channel_name(client, channel_id)
-    if actual_name != TARGET_CHANNEL_NAME:
-        logger.info(f"Ignoring channel '{actual_name}'")
-        return
+    logger.info(f"Processing message in channel {channel_id}")
 
     # Handle direct file uploads (subtype=file_share)
     if subtype == "file_share":
