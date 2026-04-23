@@ -90,10 +90,16 @@ def handle_file_shared(event: dict, client, logger) -> None:
     channel_id = event.get("channel_id")
     user_id = event.get("user_id", "")
 
+    logger.info(f"file_shared event received: file_id={file_id} channel_id={channel_id}")
+
     if not file_id or not channel_id:
+        logger.info("Skipping: missing file_id or channel_id")
         return
 
-    if _channel_name(client, channel_id) != TARGET_CHANNEL_NAME:
+    actual_name = _channel_name(client, channel_id)
+    logger.info(f"Channel name resolved: '{actual_name}' (expecting '{TARGET_CHANNEL_NAME}')")
+    if actual_name != TARGET_CHANNEL_NAME:
+        logger.info(f"Skipping: wrong channel")
         return
 
     try:
