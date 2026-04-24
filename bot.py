@@ -248,6 +248,23 @@ def handle_message(event: dict, client, logger) -> None:
         process_pdf(client, channel_id, user_id, pdf_path, filename)
 
 
+@app.event("app_mention")
+def handle_mention(event: dict, say, logger) -> None:
+    text = event.get("text", "").lower()
+    user = event.get("user", "")
+
+    if any(w in text for w in ["help", "what", "how", "?"]):
+        say(
+            f"Hey <@{user}>! Here's what I can do:\n\n"
+            ":page_facing_up: *Upload a PDF* — drag any PDF into this channel and I'll automatically add it to the Engram Zotero library\n"
+            ":link: *PDF URL* — paste a link ending in `.pdf` (including arXiv and bioRxiv links) and I'll download and save it\n"
+            ":brain: *AI summary* — after every upload I post a 2-sentence summary of the paper\n"
+            ":books: *View library* — see everything at zotero.org/groups/6396523"
+        )
+    else:
+        say(f"Hey <@{user}>! Drop a PDF in this channel and I'll add it to Zotero. Type `@Zotero help` to see everything I can do.")
+
+
 if __name__ == "__main__":
     handler = SocketModeHandler(app, SLACK_APP_TOKEN)
     handler.start()
