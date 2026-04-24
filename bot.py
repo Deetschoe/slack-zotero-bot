@@ -3,6 +3,7 @@ import re
 import tempfile
 from pathlib import Path
 
+import anthropic
 import requests
 from dotenv import load_dotenv
 from slack_bolt import App
@@ -10,6 +11,26 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 
 from pdf_metadata import extract_pdf_metadata
 from zotero_uploader import ZoteroUploader
+
+claude = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
+
+
+def summarize_paper(meta: dict) -> str:
+    title = meta.get("title", "")
+    authors = meta.get("authors", "")
+    abstract = meta.get("abstract", "")
+    if not abstract and not title:
+        return ""
+    prompt = f"Title: {title}\nAuthors: {authors}\nAbstract: {abstract}\n\nWrite a 2-sentence summary of this paper relevant to a brain organoid / biotech startup. Be specific, not generic."
+    try:
+        msg = claude.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=150,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return msg.content[0].text.strip()
+    except Exception:
+        return ""
 
 load_dotenv()
 
@@ -72,6 +93,12 @@ def process_pdf(
         parent_key, _ = uploader.upload(pdf_path, meta)
         web_url = uploader.item_web_url(parent_key)
         _update_success(client, channel_id, ts, meta["title"], web_url)
+        summary = summarize_paper(meta)
+        if summary:
+            client.chat_postMessage(
+                channel=channel_id,
+                text=f":brain: *Summary:* {summary}",
+            )
     except Exception as exc:
         _update_failure(client, channel_id, ts, str(exc))
     finally:
