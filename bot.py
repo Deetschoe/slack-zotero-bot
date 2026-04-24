@@ -64,11 +64,11 @@ def _post_uploading(client, channel_id: str) -> str:
     return resp["ts"]
 
 
-def _update_success(client, channel_id: str, ts: str, title: str, url: str) -> None:
+def _update_success(client, channel_id: str, ts: str, title: str) -> None:
     client.chat_update(
         channel=channel_id,
         ts=ts,
-        text=f":white_check_mark: *{title}* added to Zotero\n<{url}|View in Zotero>",
+        text=f":white_check_mark: *{title}* added to the Engram Zotero library.",
     )
 
 
@@ -91,14 +91,7 @@ def process_pdf(
     try:
         meta = extract_pdf_metadata(pdf_path, filename)
         parent_key, _ = uploader.upload(pdf_path, meta)
-        web_url = uploader.item_web_url(parent_key)
-        _update_success(client, channel_id, ts, meta["title"], web_url)
-        summary = summarize_paper(meta)
-        if summary:
-            client.chat_postMessage(
-                channel=channel_id,
-                text=f":brain: *Summary:* {summary}",
-            )
+        _update_success(client, channel_id, ts, meta["title"])
     except Exception as exc:
         _update_failure(client, channel_id, ts, str(exc))
     finally:
@@ -109,56 +102,8 @@ def process_pdf(
 
 
 @app.event("file_shared")
-def handle_file_shared(event: dict, client, logger) -> None:
-    file_id = event.get("file_id") or (event.get("file") or {}).get("id")
-    channel_id = event.get("channel_id")
-    user_id = event.get("user_id", "")
-
-    logger.info(f"file_shared event received: file_id={file_id} channel_id={channel_id}")
-
-    if not file_id or not channel_id:
-        logger.info("Skipping: missing file_id or channel_id")
-        return
-
-    logger.info(f"Processing file_shared in channel {channel_id}")
-
-    try:
-        info = client.files_info(file=file_id)
-    except Exception as exc:
-        logger.error(f"files_info failed: {exc}")
-        return
-
-    file_obj = info["file"]
-    mimetype = file_obj.get("mimetype", "")
-    name = file_obj.get("name", "file.pdf")
-
-    if mimetype != "application/pdf" and not name.lower().endswith(".pdf"):
-        return
-
-    download_url = file_obj.get("url_private_download") or file_obj.get("url_private")
-    if not download_url:
-        logger.error("No download URL for file")
-        return
-
-    pdf_path = f"/tmp/{file_id}.pdf"
-    try:
-        r = requests.get(
-            download_url,
-            headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}"},
-            timeout=60,
-        )
-        r.raise_for_status()
-        with open(pdf_path, "wb") as f:
-            f.write(r.content)
-    except Exception as exc:
-        logger.error(f"PDF download failed: {exc}")
-        client.chat_postMessage(
-            channel=channel_id,
-            text=f":x: Could not download PDF from Slack: {exc}",
-        )
-        return
-
-    process_pdf(client, channel_id, user_id, pdf_path, name)
+def handle_file_shared(event: dict, logger) -> None:
+    logger.info("file_shared received — handled via message handler")
 
 
 @app.event("message")
