@@ -99,8 +99,6 @@ class ZoteroUploader:
             "title": filename,
             "contentType": "application/pdf",
             "parentItem": parent_key,
-            "md5": md5hash,
-            "mtime": mtime_ms,
             "collections": [],
             "tags": [],
             "relations": {},
