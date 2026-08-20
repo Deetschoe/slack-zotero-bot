@@ -2,13 +2,15 @@ import hashlib
 import os
 import time
 from pathlib import Path
-from typing import Literal
 
 import requests
-from pyzotero import zotero
 
 
 ZOTERO_API_BASE = "https://api.zotero.org"
+
+# Item types that actually have a DOI field. Sending DOI on anything else
+# makes the API reject the whole item.
+DOI_ITEM_TYPES = {"journalArticle", "conferencePaper", "preprint"}
 
 
 class ZoteroUploader:
@@ -18,14 +20,13 @@ class ZoteroUploader:
         self.api_key = os.environ["ZOTERO_API_KEY"]
         self.collection_key = os.environ.get("ZOTERO_COLLECTION_KEY", "")
 
-        self.zot = zotero.Zotero(
-            library_id=self.library_id,
-            library_type=self.library_type,
-            api_key=self.api_key,
-        )
-
         self.session = requests.Session()
-        self.session.headers.update({"Zotero-API-Key": self.api_key})
+        self.session.headers.update(
+            {
+                "Zotero-API-Key": self.api_key,
+                "Zotero-API-Version": "3",
+            }
+        )
 
         lib_segment = (
             f"users/{self.library_id}"
@@ -34,57 +35,78 @@ class ZoteroUploader:
         )
         self.api_prefix = f"{ZOTERO_API_BASE}/{lib_segment}"
 
-    def _build_parent_item(self, meta: dict, category: str) -> dict:
-        item_type = meta.get("item_type", "journalArticle")
-        template = self.zot.item_template(item_type)
-
-        template["title"] = meta.get("title", "Untitled")
-
-        authors_raw = meta.get("authors", "")
+    def _parse_creators(self, authors_raw: str) -> list[dict]:
         creators = []
-        if authors_raw:
-            for part in authors_raw.split(";"):
-                part = part.strip()
-                if not part:
-                    continue
-                if "," in part:
-                    last, _, first = part.partition(",")
-                    creators.append(
-                        {
-                            "creatorType": "author",
-                            "firstName": first.strip(),
-                            "lastName": last.strip(),
-                        }
-                    )
-                else:
-                    creators.append(
-                        {"creatorType": "author", "name": part}
-                    )
-        template["creators"] = creators
+        for part in (authors_raw or "").split(";"):
+            part = part.strip()
+            if not part:
+                continue
+            if "," in part:
+                last, _, first = part.partition(",")
+                creators.append(
+                    {
+                        "creatorType": "author",
+                        "firstName": first.strip(),
+                        "lastName": last.strip(),
+                    }
+                )
+            else:
+                creators.append({"creatorType": "author", "name": part})
+        return creators
+
+    def _build_parent_item(self, meta: dict, category: str) -> dict:
+        # Built locally rather than via GET /items/new. pyzotero caches that
+        # template and, once the cache is over an hour old, revalidates it
+        # without the itemType query param, which comes back as
+        # "400 'itemType' not provided" and killed every upload until restart.
+        item_type = meta.get("item_type") or "journalArticle"
+
+        item: dict = {
+            "itemType": item_type,
+            "title": meta.get("title") or "Untitled",
+            "creators": self._parse_creators(meta.get("authors", "")),
+            "tags": [],
+            "collections": [self.collection_key] if self.collection_key else [],
+            "relations": {},
+        }
 
         if meta.get("abstract"):
-            template["abstractNote"] = meta["abstract"]
+            item["abstractNote"] = meta["abstract"]
         if meta.get("year"):
-            template["date"] = str(meta["year"])
-        if meta.get("doi"):
-            template["DOI"] = meta["doi"]
+            item["date"] = str(meta["year"])
+        if meta.get("doi") and item_type in DOI_ITEM_TYPES:
+            item["DOI"] = meta["doi"]
         if meta.get("source"):
-            template["url"] = meta["source"]
+            item["url"] = meta["source"]
         if category:
-            template["extra"] = f"category: {category}"
-        if self.collection_key:
-            template["collections"] = [self.collection_key]
+            item["extra"] = f"category: {category}"
 
-        return template
+        return item
+
+    def _first_key(self, resp: requests.Response, what: str) -> str:
+        data = resp.json()
+        successful = data.get("successful", {})
+        if "0" in successful:
+            return successful["0"]["key"]
+        failed = data.get("failed", {}).get("0", {})
+        raise RuntimeError(
+            f"Zotero rejected the {what}: "
+            f"{failed.get('code', '?')} {failed.get('message', data)}"
+        )
 
     def _md5(self, data: bytes) -> str:
         return hashlib.md5(data).hexdigest()
 
     def upload(self, pdf_path: str, meta: dict, category: str = "") -> tuple[str, str]:
         # Step 1: create parent item
-        parent_template = self._build_parent_item(meta, category)
-        resp = self.zot.create_items([parent_template])
-        parent_key = resp["successful"]["0"]["key"]
+        parent_resp = self.session.post(
+            f"{self.api_prefix}/items",
+            json=[self._build_parent_item(meta, category)],
+            headers={"Content-Type": "application/json"},
+            timeout=30,
+        )
+        parent_resp.raise_for_status()
+        parent_key = self._first_key(parent_resp, "item")
 
         filename = Path(pdf_path).name
         pdf_bytes = Path(pdf_path).read_bytes()
@@ -109,10 +131,10 @@ class ZoteroUploader:
             f"{self.api_prefix}/items",
             json=[att_template],
             headers={"Content-Type": "application/json"},
+            timeout=30,
         )
         att_resp.raise_for_status()
-        att_data = att_resp.json()
-        att_key = att_data["successful"]["0"]["key"]
+        att_key = self._first_key(att_resp, "attachment")
 
         # Step 6: authorize file upload
         auth_resp = self.session.post(
@@ -127,6 +149,7 @@ class ZoteroUploader:
                 "Content-Type": "application/x-www-form-urlencoded",
                 "If-None-Match": "*",
             },
+            timeout=30,
         )
         auth_resp.raise_for_status()
         auth_data = auth_resp.json()
@@ -142,7 +165,7 @@ class ZoteroUploader:
 
         fields = list(s3_params.items())
         files = [("file", (filename, pdf_bytes, "application/pdf"))]
-        s3_resp = requests.post(s3_url, data=fields, files=files)
+        s3_resp = requests.post(s3_url, data=fields, files=files, timeout=120)
         if s3_resp.status_code not in (200, 201, 204):
             raise RuntimeError(
                 f"S3 upload failed: {s3_resp.status_code} {s3_resp.text[:200]}"
@@ -151,8 +174,12 @@ class ZoteroUploader:
         # Step 8: register upload with Zotero
         reg_resp = self.session.post(
             f"{self.api_prefix}/items/{att_key}/file",
-            json={"uploadKey": upload_key},
-            headers={"Content-Type": "application/json"},
+            data={"upload": upload_key},
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "If-None-Match": "*",
+            },
+            timeout=30,
         )
         reg_resp.raise_for_status()
 

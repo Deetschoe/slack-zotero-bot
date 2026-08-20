@@ -36,14 +36,40 @@ load_dotenv()
 
 SLACK_BOT_TOKEN = os.environ["SLACK_BOT_TOKEN"]
 SLACK_APP_TOKEN = os.environ["SLACK_APP_TOKEN"]
+# Only links that plausibly point at a file. Anything else (abstract pages,
+# publisher landing pages) is not a PDF and is left alone.
 PDF_URL_RE = re.compile(
-    r"https?://[^\s>\"']+(?:"
-    r"\.pdf"
-    r"|arxiv\.org/pdf/[^\s>\"']+"
-    r"|biorxiv\.org[^\s>\"']*\.pdf[^\s>\"']*"
-    r")",
+    r"https?://[^\s<>\"']+?\.pdf(?:\?[^\s<>\"']*)?(?=[\s<>\"'),]|$)"
+    r"|https?://(?:[a-z0-9.-]*\.)?arxiv\.org/pdf/[^\s<>\"']+",
     re.IGNORECASE,
 )
+
+PDF_MAGIC = b"%PDF"
+
+
+class NotAPDF(Exception):
+    """The URL resolved to something that is not a PDF file."""
+
+
+def fetch_pdf_bytes(url: str) -> bytes:
+    """Download a URL and return its bytes, or raise if it is not a PDF.
+
+    Publisher links, paywalls and Cloudflare interstitials all return HTML with
+    a 200, so the content is checked rather than trusted.
+    """
+    r = requests.get(
+        url,
+        headers={"User-Agent": "Engram-ZoteroBot/1.0"},
+        timeout=60,
+        allow_redirects=True,
+    )
+    r.raise_for_status()
+    content = r.content
+    if PDF_MAGIC not in content[:1024]:
+        ctype = r.headers.get("Content-Type", "unknown").split(";")[0].strip()
+        raise NotAPDF(f"served {ctype}, not a PDF")
+    return content
+
 
 app = App(token=SLACK_BOT_TOKEN)
 uploader = ZoteroUploader()
@@ -140,9 +166,15 @@ def handle_message(event: dict, client, logger) -> None:
                     timeout=60,
                 )
                 r.raise_for_status()
+                if PDF_MAGIC not in r.content[:1024]:
+                    raise NotAPDF(f"{name} is not a readable PDF file")
                 with open(pdf_path, "wb") as fh:
                     fh.write(r.content)
                 logger.info(f"Downloaded file to {pdf_path}")
+            except NotAPDF as exc:
+                logger.info(f"Uploaded file is not a PDF: {exc}")
+                client.chat_postMessage(channel=channel_id, text=f":x: `{name}` is not a readable PDF, so I skipped it.")
+                continue
             except Exception as exc:
                 logger.error(f"File download failed: {exc}")
                 client.chat_postMessage(channel=channel_id, text=f":x: Could not download PDF: {exc}")
@@ -162,33 +194,26 @@ def handle_message(event: dict, client, logger) -> None:
     if not urls:
         return
 
-    for url in urls:
+    for url in dict.fromkeys(urls):
         url = url.strip("<>")
-        filename = url.rstrip("/").split("/")[-1]
+        filename = url.split("?")[0].rstrip("/").split("/")[-1]
         if not filename.lower().endswith(".pdf"):
             filename = filename + ".pdf"
 
+        # A link that turns out not to be a PDF is not the poster's mistake, so
+        # it is skipped quietly instead of dropping an :x: into the channel.
+        try:
+            pdf_bytes = fetch_pdf_bytes(url)
+        except NotAPDF as exc:
+            logger.info(f"Skipping link (not a PDF): {url} — {exc}")
+            continue
+        except Exception as exc:
+            logger.info(f"Skipping link (download failed): {url} — {exc}")
+            continue
+
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
             pdf_path = tmp.name
-
-        try:
-            r = requests.get(
-                url,
-                headers={"User-Agent": "Engram-ZoteroBot/1.0"},
-                timeout=60,
-                allow_redirects=True,
-            )
-            r.raise_for_status()
-            with open(pdf_path, "wb") as f:
-                f.write(r.content)
-        except Exception as exc:
-            logger.error(f"URL PDF download failed: {exc}")
-            client.chat_postMessage(
-                channel=channel_id,
-                text=f":x: Could not download PDF from URL `{url}`: {exc}",
-            )
-            Path(pdf_path).unlink(missing_ok=True)
-            continue
+            tmp.write(pdf_bytes)
 
         process_pdf(client, channel_id, user_id, pdf_path, filename)
 
